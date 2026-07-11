@@ -18,8 +18,10 @@
 
   const brushToolBtn = document.getElementById('brushToolBtn');
   const eraseToolBtn = document.getElementById('eraseToolBtn');
-  const brushSize   = document.getElementById('brushSize');
-  const brushReadout= document.getElementById('brushReadout');
+  const brushDownBtn = document.getElementById('brushDownBtn');
+  const brushUpBtn   = document.getElementById('brushUpBtn');
+  const brushReadout = document.getElementById('brushReadout');
+  const brushReadout2= document.getElementById('brushReadout2');
   const undoBtn     = document.getElementById('undoBtn');
   const redoBtn     = document.getElementById('redoBtn');
   const removeBtn   = document.getElementById('removeBtn');
@@ -28,12 +30,14 @@
   const zoomInBtn   = document.getElementById('zoomInBtn');
   const zoomOutBtn  = document.getElementById('zoomOutBtn');
   const zoomResetBtn= document.getElementById('zoomResetBtn');
-  const dimsReadout = document.getElementById('dimsReadout');
   const installBtn  = document.getElementById('installBtn');
+  const loupe       = document.getElementById('loupe');
+  const loupeCanvas = document.getElementById('loupeCanvas');
 
   const ictx = imgCanvas.getContext('2d', { willReadFrequently: true });
   const mctx = maskCanvas.getContext('2d', { willReadFrequently: true });
   const cctx = cursorCanvas.getContext('2d');
+  const lctx = loupeCanvas.getContext('2d');
 
   let W = 0, H = 0;
   let tool = 'brush';
@@ -41,17 +45,15 @@
   let drawing = false;
   let lastPt = null;
   let zoom = 1;
-  const ZOOM_LEVELS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3];
+  const ZOOM_LEVELS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+  const LOUPE_ZOOM = 2.6;
+  const LOUPE_SIZE = 132;
 
   // history of full-resolution image states (after each committed removal)
   let history = [];
   let historyIdx = -1;
 
-  // ---------- Setup ----------
-
-  function setStatus(text, color) {
-    // (footer status kept static/minimal by design; reserved for future use)
-  }
+  // ---------- Load image ----------
 
   function loadImageFile(file) {
     if (!file || !file.type.startsWith('image/')) return;
@@ -81,13 +83,19 @@
       history = [ictx.getImageData(0, 0, W, H)];
       historyIdx = 0;
 
-      zoom = 1;
+      zoom = fitZoom();
       applyZoom();
       updateButtons();
-      dimsReadout.textContent = `${w}×${h}px` + (scale < 1 ? `  (working at ${W}×${H})` : '');
       URL.revokeObjectURL(url);
     };
     img.src = url;
+  }
+
+  function fitZoom() {
+    const availW = stage.clientWidth - 28;
+    const availH = stage.clientHeight - 28;
+    if (W <= availW && H <= availH) return 1;
+    return Math.max(0.1, Math.min(availW / W, availH / H));
   }
 
   fileInput.addEventListener('change', e => loadImageFile(e.target.files[0]));
@@ -106,17 +114,18 @@
     history = []; historyIdx = -1;
     mctx.clearRect(0, 0, W, H);
     updateButtons();
-    dimsReadout.textContent = '';
   });
 
-  // ---------- Drawing (mask) ----------
+  // ---------- Coordinate helpers ----------
 
-  function canvasPoint(e) {
+  function canvasPointFromClient(clientX, clientY) {
     const rect = imgCanvas.getBoundingClientRect();
-    const cx = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
-    const cy = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
-    return { x: (cx / rect.width) * W, y: (cy / rect.height) * H };
+    const x = ((clientX - rect.left) / rect.width) * W;
+    const y = ((clientY - rect.top) / rect.height) * H;
+    return { x, y };
   }
+
+  // ---------- Drawing (mask) ----------
 
   function strokeAt(pt, prev) {
     mctx.lineCap = 'round';
@@ -140,32 +149,127 @@
     cctx.stroke();
   }
 
-  function pointerDown(e) {
+  // ---------- Magnifier loupe (touch only) ----------
+
+  function updateLoupe(pt, clientX, clientY) {
+    const sw = LOUPE_SIZE / LOUPE_ZOOM;
+    const sh = sw;
+    let sx = pt.x - sw / 2;
+    let sy = pt.y - sh / 2;
+    sx = Math.max(0, Math.min(W - sw, sx));
+    sy = Math.max(0, Math.min(H - sh, sy));
+
+    lctx.clearRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
+    lctx.imageSmoothingEnabled = false;
+    lctx.drawImage(imgCanvas, sx, sy, sw, sh, 0, 0, LOUPE_SIZE, LOUPE_SIZE);
+    lctx.globalAlpha = 0.45;
+    lctx.drawImage(maskCanvas, sx, sy, sw, sh, 0, 0, LOUPE_SIZE, LOUPE_SIZE);
+    lctx.globalAlpha = 1;
+
+    // crosshair + true brush-edge circle so the exact touch point is unambiguous
+    const cx = ((pt.x - sx) / sw) * LOUPE_SIZE;
+    const cy = ((pt.y - sy) / sh) * LOUPE_SIZE;
+    const rr = brushR * (LOUPE_SIZE / sw);
+    lctx.strokeStyle = tool === 'brush' ? 'rgba(209,80,58,.95)' : 'rgba(95,179,163,.95)';
+    lctx.lineWidth = 1.5;
+    lctx.beginPath(); lctx.arc(cx, cy, rr, 0, Math.PI * 2); lctx.stroke();
+    lctx.strokeStyle = 'rgba(255,255,255,.9)';
+    lctx.beginPath(); lctx.moveTo(cx - 6, cy); lctx.lineTo(cx + 6, cy); lctx.stroke();
+    lctx.beginPath(); lctx.moveTo(cx, cy - 6); lctx.lineTo(cx, cy + 6); lctx.stroke();
+
+    // position the loupe above the finger, clamped to viewport, offset so the
+    // finger never covers the area it's currently painting
+    let lx = clientX - LOUPE_SIZE / 2;
+    let ly = clientY - LOUPE_SIZE - 46;
+    if (ly < 8) ly = clientY + 46; // flip below if too close to top
+    lx = Math.max(6, Math.min(window.innerWidth - LOUPE_SIZE - 6, lx));
+    loupe.style.left = lx + 'px';
+    loupe.style.top = ly + 'px';
+    loupe.classList.add('show');
+  }
+  function hideLoupe() { loupe.classList.remove('show'); }
+
+  // ---------- Pointer / touch handling ----------
+  // One finger (or mouse) paints. Two fingers pinch-zoom / pan.
+
+  let pinch = null; // { startDist, startZoom, startMidX, startMidY, startScrollL, startScrollT }
+
+  function dist(a, b) { return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); }
+  function mid(a, b) { return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 }; }
+
+  imgCanvas.addEventListener('mousedown', e => {
     if (canvasWrap.style.display === 'none') return;
-    e.preventDefault();
     drawing = true;
-    const pt = canvasPoint(e);
+    const pt = canvasPointFromClient(e.clientX, e.clientY);
     strokeAt(pt, null);
     lastPt = pt;
     removeBtn.disabled = false;
-  }
-  function pointerMove(e) {
-    const pt = canvasPoint(e);
+  });
+  imgCanvas.addEventListener('mousemove', e => {
+    const pt = canvasPointFromClient(e.clientX, e.clientY);
     drawCursor(pt);
     if (!drawing) return;
     strokeAt(pt, lastPt);
     lastPt = pt;
-  }
-  function pointerUp() { drawing = false; lastPt = null; }
-
-  imgCanvas.addEventListener('mousedown', pointerDown);
-  imgCanvas.addEventListener('mousemove', pointerMove);
-  window.addEventListener('mouseup', pointerUp);
+  });
+  window.addEventListener('mouseup', () => { drawing = false; lastPt = null; });
   imgCanvas.addEventListener('mouseleave', () => { if (!drawing) drawCursor(null); });
 
-  imgCanvas.addEventListener('touchstart', pointerDown, { passive: false });
-  imgCanvas.addEventListener('touchmove', pointerMove, { passive: false });
-  window.addEventListener('touchend', pointerUp);
+  imgCanvas.addEventListener('touchstart', e => {
+    if (canvasWrap.style.display === 'none') return;
+    e.preventDefault();
+    if (e.touches.length === 2) {
+      drawing = false; lastPt = null; hideLoupe();
+      const [a, b] = e.touches;
+      pinch = {
+        startDist: dist(a, b),
+        startZoom: zoom,
+        startScrollL: stage.scrollLeft,
+        startScrollT: stage.scrollTop,
+        prevMid: mid(a, b),
+      };
+      return;
+    }
+    pinch = null;
+    drawing = true;
+    const t = e.touches[0];
+    const pt = canvasPointFromClient(t.clientX, t.clientY);
+    strokeAt(pt, null);
+    lastPt = pt;
+    removeBtn.disabled = false;
+    updateLoupe(pt, t.clientX, t.clientY);
+  }, { passive: false });
+
+  imgCanvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (e.touches.length === 2 && pinch) {
+      const [a, b] = e.touches;
+      const d = dist(a, b);
+      const newZoom = Math.max(0.15, Math.min(6, pinch.startZoom * (d / pinch.startDist)));
+      const m = mid(a, b);
+      zoom = newZoom;
+      applyZoom();
+      // pan so the pinch midpoint stays visually anchored
+      stage.scrollLeft = pinch.startScrollL - (m.x - pinch.prevMid.x);
+      stage.scrollTop  = pinch.startScrollT - (m.y - pinch.prevMid.y);
+      return;
+    }
+    if (!drawing) return;
+    const t = e.touches[0];
+    const pt = canvasPointFromClient(t.clientX, t.clientY);
+    strokeAt(pt, lastPt);
+    lastPt = pt;
+    updateLoupe(pt, t.clientX, t.clientY);
+  }, { passive: false });
+
+  imgCanvas.addEventListener('touchend', e => {
+    if (e.touches.length === 0) {
+      drawing = false; lastPt = null; pinch = null; hideLoupe();
+    } else if (e.touches.length === 1) {
+      pinch = null;
+    }
+  });
+  imgCanvas.addEventListener('touchcancel', () => { drawing = false; lastPt = null; pinch = null; hideLoupe(); });
 
   brushToolBtn.addEventListener('click', () => setTool('brush'));
   eraseToolBtn.addEventListener('click', () => setTool('erase'));
@@ -175,10 +279,13 @@
     eraseToolBtn.classList.toggle('active', t === 'erase');
   }
 
-  brushSize.addEventListener('input', () => {
-    brushR = parseInt(brushSize.value, 10);
+  function setBrush(v) {
+    brushR = Math.max(6, Math.min(200, v));
     brushReadout.textContent = brushR;
-  });
+    brushReadout2.textContent = brushR;
+  }
+  brushDownBtn.addEventListener('click', () => setBrush(brushR - 6));
+  brushUpBtn.addEventListener('click', () => setBrush(brushR + 6));
 
   // ---------- Zoom ----------
 
@@ -189,7 +296,7 @@
   }
   zoomInBtn.addEventListener('click', () => {
     const i = ZOOM_LEVELS.findIndex(z => z >= zoom);
-    zoom = ZOOM_LEVELS[Math.min(ZOOM_LEVELS.length - 1, i + 1)];
+    zoom = ZOOM_LEVELS[Math.min(ZOOM_LEVELS.length - 1, (i === -1 ? ZOOM_LEVELS.length - 1 : i) + 1)];
     applyZoom();
   });
   zoomOutBtn.addEventListener('click', () => {
@@ -272,8 +379,6 @@
   }
 
   // Multi-resolution diffusion inpainting (Laplace fill).
-  // Builds a pyramid, solves coarse-to-fine, so large marked regions
-  // converge fast without needing thousands of full-res iterations.
   async function inpaint(imageData, mask0, w0, h0) {
     const levels = [];
     {
@@ -285,7 +390,6 @@
       }
       levels.push({ w: w0, h: h0, rgb, mask: mask0 });
     }
-    // build pyramid down to a small base
     while (levels[levels.length - 1].w > 24 && levels[levels.length - 1].h > 24) {
       const prev = levels[levels.length - 1];
       const nw = Math.max(4, Math.round(prev.w / 2));
@@ -314,7 +418,6 @@
       if (nw <= 24 || nh <= 24) break;
     }
 
-    // solve coarsest level first
     let coarse = levels[levels.length - 1];
     initMasked(coarse);
     diffuse(coarse, 260);
@@ -325,7 +428,7 @@
       const iters = li === 0 ? 60 : Math.max(40, Math.round(120 / (levels.length - li)));
       diffuse(level, iters);
       coarse = level;
-      if (li % 2 === 0) await nextFrame(); // let UI breathe
+      if (li % 2 === 0) await nextFrame();
     }
 
     const out = new ImageData(w0, h0);
@@ -384,7 +487,7 @@
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
-        if (!mask[i]) continue; // keep true pixel value at this level
+        if (!mask[i]) continue;
         const cx = Math.min(coarse.w - 1, Math.floor(x * sx));
         const cy = Math.min(coarse.h - 1, Math.floor(y * sy));
         const ci = cy * coarse.w + cx;
@@ -395,15 +498,15 @@
     }
   }
 
-  // ---------- Keyboard shortcuts ----------
+  // ---------- Keyboard shortcuts (desktop) ----------
   window.addEventListener('keydown', e => {
     if (canvasWrap.style.display === 'none') return;
     if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undoBtn.click(); }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redoBtn.click(); }
     if (e.key === 'b') setTool('brush');
     if (e.key === 'e') setTool('erase');
-    if (e.key === '[') { brushR = Math.max(8, brushR - 6); brushSize.value = brushR; brushReadout.textContent = brushR; }
-    if (e.key === ']') { brushR = Math.min(160, brushR + 6); brushSize.value = brushR; brushReadout.textContent = brushR; }
+    if (e.key === '[') setBrush(brushR - 6);
+    if (e.key === ']') setBrush(brushR + 6);
   });
 
   // ---------- PWA install ----------
@@ -428,14 +531,8 @@
     });
   }
 
-  // mobile sidebar toggle (hidden on desktop widths)
-  const menuBtn = document.getElementById('menuBtn');
-  const sidebar = document.getElementById('sidebar');
-  function syncMenuBtn() {
-    menuBtn.style.display = window.innerWidth <= 720 ? 'flex' : 'none';
-  }
-  window.addEventListener('resize', syncMenuBtn);
-  syncMenuBtn();
-  menuBtn.addEventListener('click', () => sidebar.classList.toggle('open'));
+  window.addEventListener('resize', () => {
+    if (canvasWrap.style.display !== 'none' && W) { /* keep current zoom on resize */ }
+  });
 
 })();
