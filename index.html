@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Retoucher — Object Remover</title>
+<meta name="description" content="Paint over anything you want gone. Retoucher removes it, right in your browser, offline.">
+<meta name="theme-color" content="#151318">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<style>
+  :root{
+    --bg: #151318;
+    --panel: #1e1b22;
+    --panel-raised: #262229;
+    --hairline: #35303c;
+    --ink: #ede7e0;
+    --ink-dim: #9a92a0;
+    --safelight: #d1503a;
+    --safelight-dim: #7a3629;
+    --enlarger: #5fb3a3;
+    --warn: #e0b04a;
+    --radius: 3px;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0; height:100%;
+    background:var(--bg); color:var(--ink);
+    font-family: "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    overflow:hidden;
+  }
+  .mono{ font-family: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace; letter-spacing:.02em; }
+
+  body::before{
+    content:"";
+    position:fixed; inset:0; pointer-events:none; z-index:9999;
+    background-image: radial-gradient(circle, rgba(255,255,255,0.025) 1px, transparent 1px);
+    background-size: 3px 3px;
+    opacity:.5;
+    mix-blend-mode: overlay;
+  }
+
+  #app{ display:flex; flex-direction:column; height:100dvh; }
+
+  /* ---------- Header ---------- */
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding: 10px 16px;
+    background: linear-gradient(180deg, var(--panel), var(--bg));
+    border-bottom: 1px solid var(--hairline);
+    flex-shrink:0;
+  }
+  .brand{ display:flex; align-items:baseline; gap:10px; }
+  .brand .lamp{
+    width:9px; height:9px; border-radius:50%;
+    background: var(--safelight);
+    box-shadow: 0 0 8px 2px rgba(209,80,58,.7);
+    flex-shrink:0;
+  }
+  .brand h1{ font-size:17px; margin:0; font-weight:600; letter-spacing:.01em; }
+  .brand .tag{ font-size:10px; color:var(--ink-dim); text-transform:uppercase; letter-spacing:.12em; }
+  header .actions{ display:flex; gap:8px; align-items:center; }
+
+  button{
+    font-family:inherit; cursor:pointer;
+    background:var(--panel-raised); color:var(--ink);
+    border:1px solid var(--hairline); border-radius:var(--radius);
+    padding:7px 12px; font-size:12.5px;
+    transition: border-color .15s, background .15s, transform .05s;
+  }
+  button:hover{ border-color:#4a4350; background:#2c2731; }
+  button:active{ transform: translateY(1px); }
+  button:disabled{ opacity:.35; cursor:not-allowed; }
+  button.primary{ background:var(--safelight-dim); border-color:var(--safelight); color:#fbe9e4; }
+  button.primary:hover{ background:var(--safelight); }
+  button.ghost{ background:transparent; }
+  button.icon-btn{ width:34px; height:34px; padding:0; display:flex; align-items:center; justify-content:center; }
+
+  /* ---------- Layout ---------- */
+  #workspace{ flex:1; display:flex; min-height:0; }
+
+  #sidebar{
+    width:220px; flex-shrink:0;
+    background:var(--panel);
+    border-right:1px solid var(--hairline);
+    padding:16px 14px;
+    overflow-y:auto;
+    display:flex; flex-direction:column; gap:22px;
+  }
+  .ctrl-group label{
+    display:block; font-size:10px; text-transform:uppercase; letter-spacing:.12em;
+    color:var(--ink-dim); margin-bottom:8px;
+  }
+  .ctrl-row{ display:flex; align-items:center; gap:10px; }
+  .readout{ font-size:12px; color:var(--enlarger); min-width:34px; text-align:right; }
+  input[type=range]{
+    -webkit-appearance:none; appearance:none;
+    width:100%; height:2px; background:var(--hairline); border-radius:2px; outline:none;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:14px; height:14px; border-radius:50%;
+    background:var(--enlarger); border:2px solid var(--bg); cursor:pointer; margin-top:-6px;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:12px; height:12px; border-radius:50%; background:var(--enlarger); border:2px solid var(--bg); cursor:pointer;
+  }
+  input[type=range]::-moz-range-track{ height:2px; background:var(--hairline); border-radius:2px; }
+
+  .tool-toggle{ display:flex; gap:6px; }
+  .tool-toggle button{ flex:1; }
+  .tool-toggle button.active{ background:var(--enlarger); border-color:var(--enlarger); color:#0f1a18; font-weight:600; }
+
+  .history-row{ display:flex; gap:6px; }
+  .history-row button{ flex:1; }
+
+  .hint{ font-size:11px; color:var(--ink-dim); line-height:1.5; font-family:inherit; }
+  .hint b{ color:var(--ink); font-weight:600; }
+
+  .divider{ height:1px; background:var(--hairline); }
+
+  /* ---------- Canvas stage ---------- */
+  #stage{
+    flex:1; position:relative; overflow:auto;
+    background:
+      linear-gradient(45deg, #1a171f 25%, transparent 25%),
+      linear-gradient(-45deg, #1a171f 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #1a171f 75%),
+      linear-gradient(-45deg, transparent 75%, #1a171f 75%);
+    background-size: 22px 22px;
+    background-position: 0 0, 0 11px, 11px -11px, -11px 0px;
+    background-color:#100e13;
+    display:flex; align-items:center; justify-content:center;
+    padding:24px;
+  }
+  #canvasWrap{ position:relative; box-shadow: 0 30px 80px -20px rgba(0,0,0,.7); }
+  #imgCanvas, #maskCanvas, #cursorCanvas{
+    position:absolute; top:0; left:0;
+    image-rendering:auto;
+  }
+  #imgCanvas{ position:relative; display:block; }
+  #maskCanvas{ opacity:.45; pointer-events:none; }
+  #cursorCanvas{ pointer-events:none; }
+
+  #dropZone{
+    width:min(560px, 86vw); text-align:center;
+    border:1px dashed var(--hairline); border-radius:6px;
+    padding:56px 30px; cursor:pointer;
+    background:rgba(255,255,255,.015);
+    transition: border-color .2s, background .2s;
+  }
+  #dropZone:hover, #dropZone.drag{ border-color:var(--safelight); background:rgba(209,80,58,.06); }
+  #dropZone .glyph{
+    width:46px; height:46px; margin:0 auto 18px; border-radius:50%;
+    border:1px solid var(--safelight-dim);
+    display:flex; align-items:center; justify-content:center;
+    color:var(--safelight);
+  }
+  #dropZone h2{ font-size:19px; margin:0 0 8px; font-weight:600; }
+  #dropZone p{ font-size:13px; color:var(--ink-dim); margin:0; font-family:inherit; }
+  #dropZone .mono{ font-size:11px; color:var(--ink-dim); margin-top:16px; display:block; }
+
+  /* ---------- Processing overlay ---------- */
+  #processing{
+    position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+    background:rgba(16,14,19,.7); backdrop-filter: blur(2px); z-index:20;
+  }
+  #processing.show{ display:flex; }
+  .dev-tray{ text-align:center; }
+  .dev-tray .ring{
+    width:40px; height:40px; margin:0 auto 14px;
+    border-radius:50%; border:2px solid var(--hairline); border-top-color:var(--safelight);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+  .dev-tray p{ font-size:12px; color:var(--ink-dim); margin:0; }
+
+  /* ---------- Footer status bar ---------- */
+  footer{
+    flex-shrink:0; display:flex; align-items:center; justify-content:space-between;
+    padding:7px 16px; background:var(--panel); border-top:1px solid var(--hairline);
+    font-size:11px; color:var(--ink-dim);
+  }
+  footer .dot{ color:var(--enlarger); }
+
+  a.plain{ color:var(--enlarger); text-decoration:none; }
+  a.plain:hover{ text-decoration:underline; }
+
+  input[type=file]{ display:none; }
+
+  @media (max-width: 720px){
+    #sidebar{ width:100%; position:absolute; z-index:15; height:100%; transform:translateX(-100%); transition:transform .2s; }
+    #sidebar.open{ transform:translateX(0); }
+    .brand .tag{ display:none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="brand">
+      <span class="lamp"></span>
+      <h1>Retoucher</h1>
+      <span class="tag mono">Local &nbsp;·&nbsp; Offline &nbsp;·&nbsp; Object Remover</span>
+    </div>
+    <div class="actions">
+      <button id="menuBtn" class="ghost icon-btn" style="display:none;" title="Tools">☰</button>
+      <button id="installBtn" class="ghost" style="display:none;">Install app</button>
+      <button id="newBtn" class="ghost" disabled>Open new</button>
+      <button id="downloadBtn" class="primary" disabled>Download</button>
+    </div>
+  </header>
+
+  <div id="workspace">
+    <aside id="sidebar">
+
+      <div class="ctrl-group">
+        <label>Tool</label>
+        <div class="tool-toggle">
+          <button id="brushToolBtn" class="active">Mark</button>
+          <button id="eraseToolBtn">Unmark</button>
+        </div>
+      </div>
+
+      <div class="ctrl-group">
+        <label>Brush size — <span class="readout mono" id="brushReadout">40</span></label>
+        <input type="range" id="brushSize" min="8" max="160" value="40">
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="ctrl-group">
+        <label>History</label>
+        <div class="history-row">
+          <button id="undoBtn" disabled>Undo</button>
+          <button id="redoBtn" disabled>Redo</button>
+        </div>
+      </div>
+
+      <div class="ctrl-group">
+        <label>View</label>
+        <div class="history-row">
+          <button id="zoomOutBtn">−</button>
+          <button id="zoomResetBtn" class="mono" style="flex:1.4;">100%</button>
+          <button id="zoomInBtn">+</button>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="ctrl-group">
+        <label>Remove marked area</label>
+        <button id="removeBtn" class="primary" style="width:100%;" disabled>Remove</button>
+      </div>
+
+      <div class="divider"></div>
+
+      <p class="hint">
+        <b>How it works.</b> Paint over what you want gone — a stray object, timestamp,
+        blemish, sign. Retoucher fills the marked area by reconstructing it from the
+        surrounding pixels. Nothing is uploaded; it all runs on your device.
+      </p>
+
+    </aside>
+
+    <div id="stage">
+      <div id="dropZone">
+        <div class="glyph">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M12 3v13m0-13 5 5m-5-5-5 5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h2>Bring in a photo</h2>
+        <p>Drop an image here, or click to choose one.</p>
+        <span class="mono">JPG · PNG · WEBP — stays on this device</span>
+      </div>
+
+      <div id="canvasWrap" style="display:none;">
+        <canvas id="imgCanvas"></canvas>
+        <canvas id="maskCanvas"></canvas>
+        <canvas id="cursorCanvas"></canvas>
+        <div id="processing">
+          <div class="dev-tray">
+            <div class="ring"></div>
+            <p class="mono" id="processingLabel">reconstructing…</p>
+          </div>
+        </div>
+      </div>
+
+      <input type="file" id="fileInput" accept="image/*">
+    </div>
+  </div>
+
+  <footer>
+    <span class="mono"><span class="dot">●</span> ready</span>
+    <span class="mono" id="dimsReadout"></span>
+  </footer>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
